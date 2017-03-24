@@ -16,6 +16,7 @@
 
     <properties>
         <air.check.skip-license>true</air.check.skip-license>
+        <air.check.skip-dependency>true</air.check.skip-dependency>
     </properties>
 
     <dependencies>
@@ -49,17 +50,21 @@
     <build>
         <plugins>
             <plugin>
-                <artifactId>maven-assembly-plugin</artifactId>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <version>1.5.2.RELEASE</version>
                 <configuration>
-                    <archive>
-                        <manifest>
-                            <mainClass>io.github.findepi.jdbc.concurrency.stresser.Stresser</mainClass>
-                        </manifest>
-                    </archive>
-                    <descriptorRefs>
-                        <descriptorRef>jar-with-dependencies</descriptorRef>
-                    </descriptorRefs>
+                    <executable>true</executable>
+                    <classifier>executable</classifier>
                 </configuration>
+
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>
