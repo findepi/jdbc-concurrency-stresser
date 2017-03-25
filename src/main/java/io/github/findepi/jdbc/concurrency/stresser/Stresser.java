@@ -18,6 +18,7 @@ import java.util.function.Supplier;
 import java.util.stream.IntStream;
 
 import static com.google.common.base.Preconditions.checkState;
+import static java.util.concurrent.TimeUnit.SECONDS;
 import static java.util.stream.Collectors.toList;
 
 /**
@@ -63,7 +64,6 @@ public class Stresser
         try {
             ExecutorService executor = Executors.newFixedThreadPool(writeThreads + readThreads);
             try {
-
                 IntStream.range(0, readThreads)
                         .mapToObj(_i -> reader(connector, lastWritten, done))
                         .forEach(executor::submit);
@@ -78,6 +78,7 @@ public class Stresser
                 done.set(true);
                 executor.shutdownNow();
             }
+            executor.awaitTermination(10, SECONDS);
         }
         finally {
             tearDown(connector);
