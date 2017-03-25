@@ -8,10 +8,12 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.util.concurrent.Exchanger;
-import java.util.concurrent.ExecutionException;
+import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 import java.util.stream.IntStream;
 
@@ -42,42 +44,38 @@ public class Stresser
         catch (SQLException ignored) {
         }
 
-        stress(connector, 2, 10);
-        stress(connector, 2, 10_000);
-        stress(connector, 10, 100);
-        stress(connector, 10, 1_000_000);
-        stress(connector, 25, 1_000_000);
+        stress(connector, 1, 1, 10);
+        stress(connector, 2, 30, 10_000);
+        stress(connector, 10, 10, 100);
+        stress(connector, 10, 10, 1_000_000);
+        stress(connector, 25, 25, 1_000_000);
     }
 
-    private static void stress(Supplier<Connection> connector, int threads, long insertsPerThread)
-            throws SQLException
+    private static void stress(Supplier<Connection> connector, int writeThreads, int readThreads, long insertsPerThread)
+            throws SQLException, InterruptedException
     {
-        System.out.printf("starting %s\n", threads);
+        System.out.printf("starting %s writers, %s readers\n", writeThreads, readThreads);
+
+        AtomicReference<String> lastWritten = new AtomicReference<>(null);
+        AtomicBoolean done = new AtomicBoolean(false);
 
         setup(connector);
         try {
-            Exchanger<String> exchanger = new Exchanger<>();
-            ExecutorService executor = Executors.newFixedThreadPool(threads);
+            ExecutorService executor = Executors.newFixedThreadPool(writeThreads + readThreads);
             try {
-                IntStream.range(0, threads)
-                        .mapToObj(threadId -> executor.submit(() -> {
-                            runThread(threadId, connector, exchanger, insertsPerThread);
-                            return null;
-                        }))
-                        .collect(toList())
-                        .forEach(future -> {
-                            try {
-                                future.get();
-                            }
-                            catch (InterruptedException e) {
-                                throw new RuntimeException(e);
-                            }
-                            catch (ExecutionException e) {
-                                throw new RuntimeException(e);
-                            }
-                        });
+
+                IntStream.range(0, readThreads)
+                        .mapToObj(_i -> reader(connector, lastWritten, done))
+                        .forEach(executor::submit);
+
+                List<Callable<Void>> writers = IntStream.range(0, writeThreads)
+                        .mapToObj(threadId -> writer(threadId, connector, lastWritten, insertsPerThread))
+                        .collect(toList());
+
+                executor.invokeAll(writers);
             }
             finally {
+                done.set(true);
                 executor.shutdownNow();
             }
         }
@@ -85,35 +83,60 @@ public class Stresser
             tearDown(connector);
         }
 
-        System.out.printf("Done OK %s threads, %s runs each\n", threads, insertsPerThread);
+        System.out.printf("Done OK %s writers, %s readers, %s runs each\n", writeThreads, readThreads, insertsPerThread);
     }
 
-    private static void runThread(int threadId, Supplier<Connection> connector, Exchanger<String> exchanger, long insertsPerThread)
-            throws SQLException, InterruptedException
+    private static Callable<Void> writer(int threadId, Supplier<Connection> connector, AtomicReference<String> lastWritten, long insertsPerThread)
     {
-        try (Connection connection = connector.get();
-                PreparedStatement insert = connection.prepareStatement("insert into stress_test values (?,?)");
-                PreparedStatement select = connection.prepareStatement("select pvalue from stress_test where pkey = ?");
-        ) {
-            for (long i = 0; i < insertsPerThread; i++) {
-                insert.clearParameters();
-                select.clearParameters();
+        return () -> {
+            try (Connection connection = connector.get();
+                    PreparedStatement insert = connection.prepareStatement("insert into stress_test values (?,?)")) {
+                connection.setAutoCommit(false);
 
-                String key = "." + threadId + "." + i;
+                for (long i = 0; i < insertsPerThread; i++) {
+                    insert.clearParameters();
 
-                insert.setString(1, key);
-                insert.setString(2, "." + threadId + Strings.repeat("......" + i, 7));
-                insert.execute();
+                    String key = "." + threadId + "." + i;
 
-                String otherKey = exchanger.exchange(key);
-                select.setString(1, otherKey);
-                try (ResultSet resultSet = select.executeQuery()) {
-                    checkState(resultSet.next(), "no first row in rs");
-                    checkState(resultSet.getString(1).contains("......"), "bogus");
-                    checkState(!resultSet.next(), "second row in rs");
+                    insert.setString(1, key);
+                    insert.setString(2, "." + threadId + Strings.repeat("......" + i, 7));
+                    insert.execute();
+                    connection.commit();
+
+                    lastWritten.set(key);
                 }
             }
-        }
+
+            return null;
+        };
+    }
+
+    private static Callable<?> reader(Supplier<Connection> connector, AtomicReference<String> lastWritten, AtomicBoolean done)
+    {
+        return () -> {
+            try (Connection connection = connector.get();
+                    PreparedStatement select = connection.prepareStatement("select pvalue from stress_test where pkey = ?")) {
+                connection.setAutoCommit(false);
+
+                while (!done.get()) {
+                    String otherKey = lastWritten.get();
+                    if (otherKey == null) {
+                        // nothing written yet
+                        continue;
+                    }
+
+                    select.setString(1, otherKey);
+                    try (ResultSet resultSet = select.executeQuery()) {
+                        checkState(resultSet.next(), "no first row in rs");
+                        checkState(resultSet.getString(1).contains("......"), "bogus");
+                        checkState(!resultSet.next(), "second row in rs");
+                    }
+                    connection.commit();
+                }
+            }
+
+            return null;
+        };
     }
 
     private static void setup(Supplier<Connection> connector)
